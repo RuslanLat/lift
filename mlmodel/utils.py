@@ -243,7 +243,7 @@ def quality_flags(df: pd.DataFrame, col: str, prefix: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 # 4) БАЛАНС И ОТЧЁТЫ
 # ---------------------------------------------------------------------
-def compute_balance_and_flags(df: pd.DataFrame) -> pd.DataFrame:
+def compute_balance_and_flags(df: pd.DataFrame, rel_diff_limit: float) -> pd.DataFrame:
     """Считает баланс ХВС vs ГВС и формирует базовые флаги/подсказки.
 
     Для каждого часа вычисляет:
@@ -262,6 +262,7 @@ def compute_balance_and_flags(df: pd.DataFrame) -> pd.DataFrame:
         ``flag_over10``, наборами флагов качества по каналам и
         человеко-ориентированной подсказкой ``reason_hint``.
     """
+    print(rel_diff_limit)
     out = df.copy()
     eps = 1e-12
     xvs = pd.to_numeric(out.get(COL_ITP_XVS, np.nan), errors="coerce").clip(lower=0)
@@ -269,7 +270,7 @@ def compute_balance_and_flags(df: pd.DataFrame) -> pd.DataFrame:
     denom = np.maximum(gvs, xvs).clip(lower=eps)
     out["rel_diff"] = (gvs - xvs).abs() / denom
     out["diff_m3"] = gvs - xvs
-    out["flag_over10"] = out["rel_diff"] > THRESHOLDS["rel_diff_limit"]
+    out["flag_over10"] = out["rel_diff"] > rel_diff_limit
 
     if COL_ITP_XVS in out.columns:
         out = quality_flags(out, COL_ITP_XVS, "itp_xvs")

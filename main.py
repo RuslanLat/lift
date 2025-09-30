@@ -34,6 +34,15 @@ with tab1:
     with col2:
         indication_form = st.form("indication_form")
         indication_form.write("Прогнозирование аномалий")
+        rel_diff_limit = indication_form.slider(
+            min_value=0,
+            max_value=20,
+            value=10,
+            step=1,
+            label="предел корреляции показания ХВС и ГВС по ОДПУ, %",
+            help="по умолчанию 10%",
+            key="rel_diff_limit",
+        )
         recirculation = indication_form.checkbox(
             label="использовать Подача-Обратка как прокси ОДПУ",
             help="использовать Подача-Обратка как прокси ОДПУ (если нужно)",
@@ -65,6 +74,7 @@ with tab1:
         indication_submitted = indication_form.form_submit_button("прогноз")
 
     if indication_submitted:
+        # cfg.THRESHOLDS["rel_diff_limit"] = rel_diff_limit / 100
         # --- Загрузка
         df = pd.read_csv("data/data_jkh.csv", encoding="utf-8", sep=",")
 
@@ -73,7 +83,7 @@ with tab1:
             df.pipe(utils.normalize_time)
             .pipe(utils.harmonize_units)
             .pipe(utils.apply_recirculation, enabled=recirculation)
-            .pipe(utils.compute_balance_and_flags)
+            .pipe(utils.compute_balance_and_flags, rel_diff_limit=rel_diff_limit / 100)
         )
 
         # processed_hourly.csv
