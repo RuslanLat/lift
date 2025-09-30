@@ -66,6 +66,7 @@ if indication_submitted:
 
     # --- Онлайн-детектор
     decisions = pd.DataFrame()
+    decisions_full = pd.DataFrame()
     current = None
 
     if True:
@@ -78,82 +79,90 @@ if indication_submitted:
             # OnlineConfig подтянет пороги/приоры из config.ONLINE
             state = OnlineState(baseline=baseline, cfg=OnlineConfig())
 
-            # Построчное решение по каждому часу test-окна
-            decisions = pd.DataFrame(
-                [detect_one(state, row) for _, row in df_test.iterrows()]
-            )
-
-            # -------- Post-hoc устойчивость по длительности (минимум 2 часа) --------
-            # Берём параметр из конфигурации; по умолчанию 2
-            min_h = int(cfg.INCIDENTS.get("min_duration_for_anomaly_h", 2))
-            if not decisions.empty and min_h > 1:
-                decisions = decisions.sort_values("ts").copy()
-                # скользящая сумма по бинарному флагу
-                s = (
-                    decisions["is_anomaly"]
-                    .astype(int)
-                    .rolling(min_h, min_periods=min_h)
+            def _postprocess_decisions(decisions_df: pd.DataFrame) -> pd.DataFrame:
+                if decisions_df is None or decisions_df.empty:
+                    return decisions_df
+                d = decisions_df.sort_values("ts").reset_index(drop=True).copy()
+                # 1) severe
+                if "severe" in d.columns:
+                    severe_mask = d["severe"].astype(bool)
+                else:
+                    z_severe = float(cfg.ONLINE.get("z_severe", 5.0))
+                    severe_mask = (d["z_delta"].abs() >= z_severe) | (
+                        d["z_ratio"].abs() >= z_severe
+                    )
+                # 2) базовый флаг
+                base_flag = (
+                    d["raw_is_anomaly"]
+                    if "raw_is_anomaly" in d.columns
+                    else d["is_anomaly"]
+                )
+                base_flag = base_flag.astype(int)
+                # 3) длительность
+                min_h = int(
+                    cfg.INCIDENTS.get(
+                        "min_duration_h",
+                        cfg.INCIDENTS.get("min_duration_for_anomaly_h", 2),
+                    )
+                )
+                if min_h < 1:
+                    min_h = 1
+                roll = (
+                    base_flag.rolling(min_h, min_periods=min_h)
                     .sum()
+                    .fillna(0)
+                    .astype(int)
                 )
-                # is_anomaly становится True только если подряд >= min_h часов с True
-                # Присваиваем «текущему» часу: удобнее сдвинуть окно на конец
-                decisions["is_anomaly"] = (s >= min_h).fillna(False).astype(bool).values
+                persist_ok = roll.ge(min_h)
+                # 4) финальный флаг
+                d["is_anomaly_final"] = (persist_ok | severe_mask).astype(bool)
+                d["is_anomaly"] = d["is_anomaly_final"]
+                # 5) синхронизируем вероятности
+                prob_cols = [c for c in d.columns if c.startswith("p_")]
+                if prob_cols:
+                    mask_norm = ~d["is_anomaly"]
+                    for k in [
+                        "normal",
+                        "leak",
+                        "odpu_fault",
+                        "itp_fault",
+                        "tamper",
+                        "tech",
+                    ]:
+                        col = f"p_{k}"
+                        if col in d.columns:
+                            d.loc[mask_norm, col] = 1.0 if k == "normal" else 0.0
+                    d["top_cause"] = (
+                        d[prob_cols].idxmax(axis=1).str.replace("^p_", "", regex=True)
+                    )
 
-                # опционально: можно сбросить вероятности к «норме» для часов,
-                # которые отсеялись пост-фильтром
-                mask_norm = ~decisions["is_anomaly"]
-                for k in [
-                    "normal",
-                    "leak",
-                    "odpu_fault",
-                    "itp_fault",
-                    "tamper",
-                    "tech",
-                ]:
-                    col = f"p_{k}"
-                    if col in decisions.columns:
-                        decisions.loc[mask_norm, col] = 1.0 if k == "normal" else 0.0
-                # top_cause пересчитать по обновлённым probs
-                decisions["top_cause"] = (
-                    decisions[
-                        [
-                            "p_normal",
-                            "p_leak",
-                            "p_odpu_fault",
-                            "p_itp_fault",
-                            "p_tamper",
-                            "p_tech",
-                        ]
-                    ]
-                    .idxmax(axis=1)
-                    .str.replace("^p_", "", regex=True)
-                )
-
-            if not decisions.empty:
-
+                # 6) человеко-понятные поля
                 def pct(x):
-                    """Локальный форматтер: долю - проценты с 1 знаков после запятой."""
                     try:
                         return round(float(x) * 100, 1)
                     except Exception:
                         return x
 
-                # Вероятности на русском
                 for k, rus in cfg.RU_CAUSE.items():
                     col_src = f"p_{k}"
                     col_dst = f"P({rus}), %"
-                    if col_src in decisions.columns:
-                        decisions[col_dst] = decisions[col_src].apply(pct)
+                    if col_src in d.columns:
+                        d[col_dst] = d[col_src].apply(pct)
+                d["Причина (top)"] = d["top_cause"].map(cfg.RU_CAUSE).fillna("—")
+                d["Интерпретация"] = d["top_cause"].map(cfg.RU_RULE).fillna("—")
+                d["Аномалия"] = d["is_anomaly"].astype(bool)
+                return d
 
-                # Топ-причина на русском + правило и флаг аномалии
-                decisions["Причина (top)"] = (
-                    decisions["top_cause"].map(cfg.RU_CAUSE).fillna("—")
-                )
-                decisions["Интерпретация"] = (
-                    decisions["top_cause"].map(cfg.RU_RULE).fillna("—")
-                )
-                decisions["Аномалия"] = decisions["is_anomaly"].astype(bool)
+            # Построчное решение по каждому часу test-окна
+            decisions = pd.DataFrame(
+                [detect_one(state, row) for _, row in df_test.iterrows()]
+            )
+            decisions = _postprocess_decisions(decisions)
 
+            decisions_full = pd.DataFrame(
+                [detect_one(state, row) for _, row in df_sorted.iterrows()]
+            )
+            decisions_full = _postprocess_decisions(decisions_full)
             # decisions.to_csv(dec_path, index=False)
 
             # current_decision.json

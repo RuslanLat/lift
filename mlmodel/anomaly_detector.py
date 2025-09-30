@@ -294,6 +294,15 @@ class OnlineConfig:
     q_low: float | None = None
     q_high: float | None = None
 
+    # Гистерезис и severe
+    zdelta_enter: float | None = None
+    zdelta_exit: float | None = None
+    zratio_enter: float | None = None
+    zratio_exit: float | None = None
+    z_severe: float | None = None
+    # Низкие потоки — гейт
+    min_flow_m3h: float | None = None
+
     def __post_init__(self) -> None:
         """Заполняет None значениями из конфигурации."""
         C = cfg.ONLINE
@@ -307,6 +316,17 @@ class OnlineConfig:
             self.posterior_alarm = C["posterior_alarm"]
         if self.prior is None:
             self.prior = dict(C["prior"])
+        # гистерезис + severe
+        if self.zdelta_enter is None:
+            self.zdelta_enter = C.get("zdelta_enter", self.zdelta_alarm)
+        if self.zdelta_exit is None:
+            self.zdelta_exit = C.get("zdelta_exit", self.zdelta_alarm)
+        if self.zratio_enter is None:
+            self.zratio_enter = C.get("zratio_enter", self.zratio_alarm)
+        if self.zratio_exit is None:
+            self.zratio_exit = C.get("zratio_exit", self.zratio_alarm)
+        if self.z_severe is None:
+            self.z_severe = C.get("z_severe", 5.0)
         D = cfg.DETECTOR
         if self.use_quantile_corridor is None:
             self.use_quantile_corridor = bool(D.get("use_quantile_corridor", False))
@@ -314,6 +334,8 @@ class OnlineConfig:
             self.q_low = float(D.get("q_low", 0.05))
         if self.q_high is None:
             self.q_high = float(D.get("q_high", 0.95))
+        if self.min_flow_m3h is None:
+            self.min_flow_m3h = float(D.get("min_flow_m3h", 0.2))
 
 
 @dataclass
@@ -423,13 +445,24 @@ def detect_one(state: OnlineState, row: pd.Series) -> Dict[str, Any]:
         "odpu_spike": bool(row.get("odpu_gvs_spike", False)),
     }
 
+    # Гейт по низкому потоку
+    flow_gate = max(xvs, gvs) < cfg_.min_flow_m3h
+
+    # Гистерезис по z: вход/выход
+    z_enter = (abs(z_delta) >= cfg_.zdelta_enter) or (abs(z_ratio) >= cfg_.zratio_enter)
+    is_anomaly_z = z_enter  # для одиночного часа используем «enter»
+
+    # severe: одиночный пик очень большой |z|
+    is_severe = (abs(z_delta) >= cfg_.z_severe) or (abs(z_ratio) >= cfg_.z_severe)
+
     # Решение об аномалии
     abs_delta_ok = abs(delta) >= cfg_.min_abs_delta_m3
-    is_anomaly_z = (
-        abs(z_delta) >= cfg_.zdelta_alarm or abs(z_ratio) >= cfg_.zratio_alarm
-    )
-    is_anomaly = (is_anomaly_z or corridor_flag) and abs_delta_ok
-    is_anomaly = is_anomaly or bool(row.get("flag_over10", False))
+    # «Сырой» флаг (до персистентности): z/коридор/дельта/гейт/over10
+    raw_is_anomaly = (
+        (is_anomaly_z or corridor_flag) and not flow_gate and abs_delta_ok
+    ) or bool(row.get("flag_over10", False))
+    # Итог внутри часа с учётом severe
+    is_anomaly = raw_is_anomaly or is_severe
 
     # Байесовский скоринг причин
     logp = {k: float(np.log(v + 1e-12)) for k, v in cfg_.prior.items()}
@@ -476,9 +509,15 @@ def detect_one(state: OnlineState, row: pd.Series) -> Dict[str, Any]:
     probs = {k: float(np.exp(v - mx)) for k, v in logp.items()}
     ssum = sum(probs.values()) or 1.0
     probs = {k: v / ssum for k, v in probs.items()}
-    # Коллапс в «Норму», если аномалии нет
+    # Постобработка вероятностей:
+    #  - если аномалии НЕТ — всё в «Норму»;
+    #  - если аномалия ЕСТЬ — исключаем «Норму» и пере-нормируем по ненормальным причинам.
     if not is_anomaly:
         probs = {k: (1.0 if k == "normal" else 0.0) for k in probs}
+    else:
+        non_norm = [k for k in probs.keys() if k != "normal"]
+        s = sum(probs[k] for k in non_norm) or 1.0
+        probs = {k: (probs[k] / s if k in non_norm else 0.0) for k in probs}
 
     best = max(probs.items(), key=lambda kv: kv[1])
 
@@ -490,7 +529,10 @@ def detect_one(state: OnlineState, row: pd.Series) -> Dict[str, Any]:
         "ratio": ratio,
         "z_delta": float(z_delta),
         "z_ratio": float(z_ratio),
+        "raw_is_anomaly": bool(raw_is_anomaly),
+        "severe": bool(is_severe),
         "is_anomaly": bool(is_anomaly),
+        "is_anomaly_final": bool(is_anomaly),
         "top_cause": best[0],
         "top_cause_prob": float(best[1]),
         **{f"p_{k}": v for k, v in probs.items()},

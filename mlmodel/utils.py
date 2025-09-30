@@ -414,8 +414,12 @@ def build_incidents(
             ]
         )
 
+    # Единый параметр длительности: сначала новый ключ, затем старый (бэкомпат)
     if min_len_hours is None:
-        min_len_hours = cfg.INCIDENTS["min_len_hours"]
+        min_len_hours = cfg.INCIDENTS.get(
+            "min_duration_h",
+            cfg.INCIDENTS.get("min_len_hours", 1),
+        )
     if ru_cause_map is None:
         ru_cause_map = cfg.RU_CAUSE
 
