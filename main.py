@@ -27,7 +27,7 @@ css = """
 """
 st.markdown(css, unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["Стат Модель", "ML Модель"])
+tab1, tab2 = st.tabs(["Статистическая модель", "Прогнозная модель"])
 
 with tab1:
     col1, col2, col3 = st.columns((1, 3, 1))
