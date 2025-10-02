@@ -243,7 +243,9 @@ def quality_flags(df: pd.DataFrame, col: str, prefix: str) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 # 4) БАЛАНС И ОТЧЁТЫ
 # ---------------------------------------------------------------------
-def compute_balance_and_flags(df: pd.DataFrame, rel_diff_limit: float) -> pd.DataFrame:
+def compute_balance_and_flags(
+    df: pd.DataFrame, *, rel_diff_limit: float
+) -> pd.DataFrame:
     """Считает баланс ХВС vs ГВС и формирует базовые флаги/подсказки.
 
     Для каждого часа вычисляет:
